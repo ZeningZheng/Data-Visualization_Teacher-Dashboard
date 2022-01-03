@@ -1,0 +1,328 @@
+---
+title: "Teacher_Dashboard_2021-10-08"
+author: "TB"
+date: "8 10 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r warning=FALSE}
+#### PREPERATION ####
+# Installl Packages
+# Find everything that you currently have installed
+all_installed_packaged <- installed.packages()[, "Package"]
+# Install any missing, but required packages
+
+# nolint start
+if (!"tidyverse" %in% all_installed_packaged) {install.packages("tidyverse")}
+if (!"cowplot" %in% all_installed_packaged) {install.packages("cowplot")}
+if (!"lintr" %in% all_installed_packaged) {install.packages("lintr")}
+if (!"oefenwebDatabase" %in% all_installed_packaged) {devtools::install_github(repo = "Oefenweb/r-database")}
+# nolint end
+
+# Load Required Packages
+library("ggplot2")
+library("cowplot")
+
+# start with an empty workspace:
+rm(list = ls())
+# to prepare data
+suppressMessages(library("dplyr"))
+# make database connection
+con <- oefenwebDatabase::connect()
+
+```
+
+Read in data from oefenweb
+```{r warning=FALSE}
+# get users information
+data_users <- DBI::dbGetQuery(con,
+                          "SELECT
+users.id, users.role_id, users.grade,
+users.new_school_id, users.login_count,
+school_classes_users.new_school_class_id
+
+FROM users
+LEFT JOIN school_classes_users ON users.id = school_classes_users.new_user_id
+WHERE users.role_id = 1
+  AND users.grade = 5 ")
+
+
+# select only application id 1:math
+
+data_domain_ability <- DBI::dbGetQuery(con,
+                              "SELECT
+user_domain_ratings.domain_id, user_domain_ratings.q_score,
+user_domain_ratings.last_played,
+user_domain_ratings.num_played, user_domain_ratings.new_user_id,
+domains.token
+
+FROM user_domain_ratings
+LEFT JOIN domains ON user_domain_ratings.domain_id = domains.id
+WHERE domain_id IN (SELECT id FROM domains WHERE application_id = 1)")
+
+# filter users played over 20
+data_domain_ability <- data_domain_ability %>%
+  filter(num_played > 20)
+```
+
+Prepare the first plot: mean performance per domain per class/school/overall
+```{r  warning=FALSE, fig.width = 9, fig.height = 5}
+# combine data, choose data from 2021-9-13 -- 2021-9-20
+data_school <- right_join(data_users,
+                          data_domain_ability, by = c("id" = "new_user_id"))
+
+data_school$last_played <- as.Date(data_school$last_played, format = "%Y-%m-%d")
+
+data_school_recent <-
+  subset(data_school, last_played > "2021-9-13" & last_played < "2021-9-20")
+
+
+# average q-score for all schools, and school 11, grade=5
+mean_1 <- data_school_recent %>%
+  group_by(new_school_id) %>%
+  as.data.frame()
+
+mean_data <-
+  aggregate(mean_1["q_score"],
+                       list(mean_1$new_school_id, mean_1$token), mean)
+
+mean_domain <-
+  aggregate(mean_1["q_score"],
+            list(mean_1$token), mean)
+
+
+# average q-score of class = 2141, grade = 5, school = 11
+mean_data_class286 <- data_school_recent %>%
+  filter(new_school_id == 11,
+         new_school_class_id == 2141) %>%
+  as.data.frame()
+
+mean_data_class286 <- aggregate(mean_data_class286["q_score"],
+                       list(mean_data_class286$new_school_id,
+                            mean_data_class286$token), mean)
+
+# plot 1
+plot_mean_scores <- mean_domain %>%
+  ggplot(aes(x = as.factor(Group.1), y = q_score)) +
+  geom_point(size = 5, aes(color = "School")) +
+  geom_point(data = mean_data %>% filter(Group.1 == 11),
+             aes(x = as.factor(Group.2), y = q_score, color = "Your School"),
+             size = 5) +
+  geom_point(data = mean_data_class286,
+             aes(x = as.factor(Group.2), y = q_score, color = "Your Class"),
+             size = 3) +
+  scale_color_manual(values = c("#b2abd2", "#5e3c99", "#fdb863")) +
+  geom_hline(yintercept = 400, size = 1, color = "black", alpha = 0.7) +
+  geom_hline(yintercept = 500, size = 1, color = "black", alpha = 0.7) +
+  coord_flip() +
+  theme_classic() +
+  scale_y_continuous(breaks = seq(100, 600, by = 50)) +
+  scale_x_discrete(limits = c("mole-game", "counting",
+                              "one-two-three", "split",
+                              "money", "measuring",
+                              "figure-place", "clock",
+                              "form-color", "numbers",
+                              "addition", "code-language",
+                              "tables", "series",
+                              "stories", "subtraction",
+                              "slowmix", "division",
+                              "flowercode")) +
+  labs(x = "Domain",
+       y = "Average Q-score",
+       title = "Summary of Math Ability In a Week",
+       subtitle = paste0("*Q-score of student should reach 500 ",
+       "at the end of the year")) +
+  theme(plot.background = element_rect(color = "black"),
+        panel.grid.major.y = element_line(size = 0.1, color = "black"),
+        plot.title = element_text(size = 15, face = "bold"),
+        plot.subtitle = element_text(size = 10, face = "italic"),
+        axis.text.x = element_text(hjust = 0.5, vjust = 0.5, size = 10),
+        legend.position = "top", legend.justification = "left",
+        legend.title = element_blank())
+
+# print plot
+plot_mean_scores
+
+# save plot
+ggsave("P1.png", width = 9, height = 5)
+```
+
+Read in weekly data from oefenweb/SQL and add fictional names to classes
+```{r warning=FALSE}
+# read in weekly data
+weekly_data <- DBI::dbGetQuery(con, "SELECT
+  user_domain_rating_weeks.domain_id, user_domain_rating_weeks.q_score,
+  user_domain_rating_weeks.q_score_diff, user_domain_rating_weeks.num_played,
+  user_domain_rating_weeks.num_played_diff,
+  user_domain_rating_weeks.start, user_domain_rating_weeks.new_user_id,
+  domains.token
+  FROM user_domain_rating_weeks
+  LEFT JOIN domains ON domains.id = user_domain_rating_weeks.domain_id
+  WHERE start = '2021-09-13' AND
+  new_user_id IN (SELECT new_user_id FROM school_classes_users
+  WHERE new_school_class_id = 2141)
+  ")
+
+# add names to weekly data
+new_user_id <- unique(weekly_data$new_user_id)
+names <- c("John", "Rens", "Rob", "Anniek", "Isobel", "Mary", "Andrew", "Sanne",
+           "Maria", "Hannah", "Theo", "Sophie", "Laura", "Natasha", "Jake",
+           "Tom", "William", "Luca", "Effy", "Anne",
+           "Molly", "Michael", "Sue")
+names <- as.data.frame(cbind(new_user_id, names))
+names$new_user_id <- as.numeric(names$new_user_id)
+weekly_data <- weekly_data %>% left_join(names, by = "new_user_id")
+```
+
+Prepare plots that show the weekly performance  
+```{r  warning=FALSE, fig.width = 9, fig.height = 5}
+# number of items played in the flowercode domain this week
+plot_a <- weekly_data %>%
+  filter(domain_id == 13) %>%
+  ggplot(aes(y = reorder(as.factor(names), num_played_diff),
+             x = num_played_diff)) +
+  geom_col(stat = "identity", fill = "#b2abd2") +
+  labs(x = "Number of items played", y = "Student") +
+  ggtitle("Number of Items Played") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+        plot.background = element_rect(color = "black"),
+        legend.position = "none")
+
+# q-score chnage for children who practiced in the flowercode domain this week
+plot_b <- weekly_data %>%
+  filter(domain_id == 13) %>%
+  ggplot(aes(y = reorder(as.factor(names), q_score_diff),
+             x = q_score_diff, fill = q_score_diff > 0)) +
+  scale_fill_manual(values = c("#5e3c99", "#b2abd2")) +
+  geom_col(stat = "identity") +
+  labs(x = "Q-Score Chang", y = "Student") +
+  ggtitle("Q-Score Changes") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+        plot.background = element_rect(color = "black"),
+                          legend.position = "none")
+
+# total q-score for children who practiced in the flowercode domain this week
+plot_c <- weekly_data %>%
+  filter(domain_id == 13) %>%
+  ggplot(aes(x = reorder(as.factor(names), q_score),
+             y = q_score)) +
+  geom_col(stat = "identity", fill = "#b2abd2") +
+  labs(x = "Q-Score", y = "Student") +
+  ggtitle("Overall Q-Score") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+        plot.background = element_rect(color = "black"),
+        legend.position = "none") +
+  geom_hline(yintercept = 400, size = 0.5, color = "red", alpha = 0.7) +
+  geom_hline(yintercept = 500, size = 0.5, color = "red", alpha = 0.7) +
+  coord_flip()
+
+# making the plotting grid
+plot_a_b_c <- plot_grid(plot_a, plot_b, plot_c, ncol = 1)
+title <- ggdraw() + draw_label("This Week in Domain Flowercode",
+                               fontface = "bold")
+this_week <- plot_grid(title, plot_a_b_c, ncol = 1, rel_heights = c(0.1, 1),
+                       labels = c("D", "", ""))
+
+# print plot
+this_week
+
+# save plot
+ggsave("P3.png", width = 9, height = 5)
+```
+
+Prepare the plot of individual students per domain 
+```{r  warning=FALSE, fig.width = 9, fig.height = 5}
+# write a function to name outliers
+is_low_outlier <- function(x) {
+  return(x < quantile(x, 0.25) - 1.5 * IQR(x))
+}
+
+# plot
+plot_students_domain <- weekly_data %>%
+  filter(domain_id %in% c(13, 4, 12, 2, 60, 10, 59, 70, 1, 41)) %>%
+  mutate(type = ifelse(token %in% c("code-language", "flowercode", "series",
+                                    "division", "slowmix", "tables"),
+                       "Active", "Inactive")) %>%
+  mutate(week_end_q_score = q_score + q_score_diff) %>%
+  group_by(token) %>%
+  mutate(outlier = ifelse(is_low_outlier(q_score), names, "")) %>%
+  ggplot(aes(x = factor(token, levels = c("code-language", "flowercode",
+                                          "series", "division", "slowmix",
+                                          "tables", "numbers", "stories",
+                                          "addition",
+                                          "subtraction")),
+             y = q_score, color = type, fill = type)) +
+  scale_color_manual(name = "status", values = c("#5e3c99", "#b2abd2")) +
+  scale_fill_manual(name = "status", guide = "legend",
+                    values = c("#5e3c99", "#b2abd2")) +
+  geom_dotplot(binaxis = "y", stackdir = "center",
+               dotsize = 0.6, colour = "black") +
+  geom_text(aes(label = outlier),
+            na.rm = TRUE, hjust = -0.2, vjust = -.75, size = 4) +
+  labs(x = "", y = "Q-score") +
+  ggtitle("Student's Performance Per Domain") +
+  theme_classic() +
+  theme(panel.grid.major.x = element_line(size = 0.05, color = "black"),
+        plot.title = element_text(face = "bold", hjust = 0.5),
+        axis.title = element_text(size = 13),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+        legend.position = "top") +
+  geom_hline(yintercept = 400, size = 0.5, color = "red", alpha = 0.7) +
+  geom_hline(yintercept = 500, size = 0.5, color = "red", alpha = 0.7)
+
+plot_students_domain
+ggsave("P2-1.png", width = 9, height = 5)
+```
+
+Prepare the plot of the number of players per domain 
+```{r  warning=FALSE, fig.width = 9, fig.height = 3}
+weekly_data %>%
+  filter(domain_id %in% c(13, 4, 12, 2, 60, 10, 59, 70, 1, 41)) %>%
+  group_by(token) %>%
+  count() %>%
+  ggplot(aes(x = reorder(as.factor(token), -n), y = n, fill = (n < 5))) +
+  geom_col() +
+  scale_fill_manual(values = c("#5e3c99", "#b2abd2"),
+                    labels = c("active", "inactive")) +
+  geom_text(aes(label = n), vjust = 1.5, colour = "white") +
+  labs(x = "Domain", y = "Number of students", fill = "Domain status") +
+  theme_classic() +
+  ggtitle("Number of Students Who Played in Each Domain This Week") +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        axis.text.x = element_text(vjust = 1, hjust = 1, size = 10,
+                                   angle = 45),
+        legend.position = c(0.5, .95),
+        legend.direction = "horizontal",
+        legend.spacing.x = unit(0.5, "cm"),
+        axis.title = element_text(size = 13)) -> plot_domain_nr_players
+
+plot_domain_nr_players
+ggsave("P2-2.png", width = 9, height = 3)
+```
+
+Put the plots together 
+```{r  warning=FALSE, fig.height = 8, fig.width = 25, fig.align = "center"}
+# combine plots B and C
+plot_domain_perf <- plot_grid(plot_students_domain, plot_domain_nr_players,
+                              nrow = 2, labels = c("B", "C"))
+
+# name plot A
+plot_mean_scores <- plot_grid(plot_mean_scores, scale = 0.9,
+                              labels = c("A", ""))
+
+# combine plot A, B, C
+final_pic <- plot_grid(plot_mean_scores, plot_domain_perf, this_week,
+                       ncol = 3, scale = 0.9)
+
+# final plot
+final_pic
+```
+
